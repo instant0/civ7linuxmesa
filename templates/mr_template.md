@@ -27,9 +27,9 @@ This patch set focuses on preventing invalid state propagation and reducing avoi
 - After: successful stress run observed (`exit_code=0`) with no OODM markers in run trace.
 
 ## Evidence references
-- failing run: `/home/malware/projects/civ7linux/docs/trace_runs/20260325_222212`
-- successful run: `/home/malware/projects/civ7linux/docs/trace_runs/20260325_222638`
-- detailed timeline: `/home/malware/projects/civ7linux/docs/wsl_vulkan_debug_progress.md`
+- failing run: `/home/username/projects/civ7linux/docs/trace_runs/20260325_222212`
+- successful run: `/home/username/projects/civ7linux/docs/trace_runs/20260325_222638`
+- detailed timeline: `/home/username/projects/civ7linux/docs/wsl_vulkan_debug_progress.md`
 
 ## Notes
 - Some local instrumentation used for diagnosis (`DZN_CONTRACT_LOG`, `DZN_OODM_TRACE`) is intentionally kept out of this MR unless requested.

@@ -12,7 +12,7 @@ On WSL2 (Ubuntu 24.04.4) using dzn over D3D12 with an RTX 4080, Civ7 triggers in
 
 ## Repro
 ```bash
-/home/malware/projects/civ7linux/launcher_trace_contract.sh \
+/home/username/projects/civ7linux/launcher_trace_contract.sh \
   --adapter NVIDIA \
   --no-validation --no-api-dump --no-d3d12-debug \
   --sync legacy --thread-submit 0 \

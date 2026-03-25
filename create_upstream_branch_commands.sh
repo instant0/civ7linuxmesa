@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Run from anywhere; this script uses absolute paths.
-MESA_REPO="/home/malware/projects/civ7linux/mesa-debug/src/mesa"
+MESA_REPO="/home/username/projects/civ7linux/mesa-debug/src/mesa"
 WORK_BRANCH="civ7-wsl2-dzn-fixes"
 
 echo "Using repo: $MESA_REPO"
@@ -16,5 +16,5 @@ echo "2) Commit in small logical chunks with Signed-off-by."
 echo "3) Generate patch series:"
 echo "   git -C \"$MESA_REPO\" format-patch -n origin/main --cover-letter"
 echo "4) Fill templates in:"
-echo "   /home/malware/projects/civ7linux/patch-details/templates"
+echo "   /home/username/projects/civ7linux/patch-details/templates"
 

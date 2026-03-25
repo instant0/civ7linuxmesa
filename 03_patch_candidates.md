@@ -1,7 +1,7 @@
 # 3) Patch Candidates For Upstream
 
 Source tree:
-- `/home/malware/projects/civ7linux/mesa-debug/src/mesa`
+- `/home/username/projects/civ7linux/mesa-debug/src/mesa`
 
 ## Candidate A: dzn queue family transfer granularity
 - File: `src/microsoft/vulkan/dzn_device.c`
