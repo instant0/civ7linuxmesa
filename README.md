@@ -2,6 +2,8 @@
 
 This folder contains a submission-ready bundle for upstreaming the findings from the Civ7 Vulkan stability work on WSL2.
 
+Generated with CODEX 5.3 with some heavy guidance and troubleshooting from the user.
+
 ## Base revision
 - Mesa tree: `/home/username/projects/civ7linux/mesa-debug/src/mesa`
 - Base commit: `16e15ee20514de1684b349e809fa9632e5afbe4d`
