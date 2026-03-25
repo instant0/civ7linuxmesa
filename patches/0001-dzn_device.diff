@@ -1,0 +1,233 @@
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index 7248e06..07ce2b5 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -192,6 +192,156 @@ static const struct debug_control dzn_debug_options[] = {
+    { NULL, 0 }
+ };
+ 
++static bool
++dzn_contract_log_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *opt = os_get_option("DZN_CONTRACT_LOG");
++      enabled = (opt && opt[0] && strcmp(opt, "0") != 0) ? 1 : 0;
++   }
++   return enabled == 1;
++}
++
++static bool
++dzn_experimental_dual_src_blend_enabled(void)
++{
++   return debug_get_bool_option("DZN_EXPERIMENTAL_DUAL_SRC_BLEND", false);
++}
++
++static void
++dzn_contract_log_extensions(const char *scope, uint32_t count, const char *const *names)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[%s]: extension_count=%u\n", scope, count);
++   for (uint32_t i = 0; i < count; i++)
++      fprintf(stderr, "DZN_CONTRACT[%s]: ext[%u]=%s\n", scope, i, names[i]);
++}
++
++static void
++dzn_contract_log_instance_create_info(const VkInstanceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[instance]: apiVersion=0x%x app=%s engine=%s\n",
++           info->pApplicationInfo ? info->pApplicationInfo->apiVersion : 0,
++           (info->pApplicationInfo && info->pApplicationInfo->pApplicationName) ?
++           info->pApplicationInfo->pApplicationName : "(null)",
++           (info->pApplicationInfo && info->pApplicationInfo->pEngineName) ?
++           info->pApplicationInfo->pEngineName : "(null)");
++   dzn_contract_log_extensions("instance", info->enabledExtensionCount, info->ppEnabledExtensionNames);
++}
++
++static void
++dzn_contract_log_features2(const VkPhysicalDeviceFeatures2 *f2)
++{
++   fprintf(stderr,
++           "DZN_CONTRACT[device]: features2 core: dualSrcBlend=%d samplerAnisotropy=%d imageCubeArray=%d shaderInt64=%d\n",
++           f2->features.dualSrcBlend,
++           f2->features.samplerAnisotropy,
++           f2->features.imageCubeArray,
++           f2->features.shaderInt64);
++}
++
++static void
++dzn_contract_log_device_feature_chain(const VkDeviceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   if (info->pEnabledFeatures) {
++      const VkPhysicalDeviceFeatures *f = info->pEnabledFeatures;
++      fprintf(stderr,
++              "DZN_CONTRACT[device]: enabledFeatures legacy: dualSrcBlend=%d samplerAnisotropy=%d imageCubeArray=%d shaderInt64=%d\n",
++              f->dualSrcBlend, f->samplerAnisotropy, f->imageCubeArray, f->shaderInt64);
++   }
++
++   const VkBaseInStructure *ext = (const VkBaseInStructure *)info->pNext;
++   while (ext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2: {
++         dzn_contract_log_features2((const VkPhysicalDeviceFeatures2 *)ext);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
++         const VkPhysicalDeviceVulkan11Features *f = (const VkPhysicalDeviceVulkan11Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan11: multiview=%d variablePointers=%d\n",
++                 f->multiview, f->variablePointers);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
++         const VkPhysicalDeviceVulkan12Features *f = (const VkPhysicalDeviceVulkan12Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan12: descriptorIndexing=%d bufferDeviceAddress=%d timelineSemaphore=%d shaderFloat16=%d\n",
++                 f->descriptorIndexing, f->bufferDeviceAddress, f->timelineSemaphore, f->shaderFloat16);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: {
++         const VkPhysicalDeviceVulkan13Features *f = (const VkPhysicalDeviceVulkan13Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan13: dynamicRendering=%d synchronization2=%d\n",
++                 f->dynamicRendering, f->synchronization2);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES: {
++         const VkPhysicalDeviceDescriptorIndexingFeatures *f =
++            (const VkPhysicalDeviceDescriptorIndexingFeatures *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: descriptorIndexingEXT: runtimeDescriptorArray=%d descriptorBindingPartiallyBound=%d\n",
++                 f->runtimeDescriptorArray, f->descriptorBindingPartiallyBound);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES: {
++         const VkPhysicalDeviceBufferDeviceAddressFeatures *f =
++            (const VkPhysicalDeviceBufferDeviceAddressFeatures *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: bufferDeviceAddressEXT: bufferDeviceAddress=%d captureReplay=%d\n",
++                 f->bufferDeviceAddress, f->bufferDeviceAddressCaptureReplay);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES: {
++         const VkPhysicalDeviceDynamicRenderingFeatures *f =
++            (const VkPhysicalDeviceDynamicRenderingFeatures *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: dynamicRenderingKHR=%d\n", f->dynamicRendering);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES: {
++         const VkPhysicalDeviceTimelineSemaphoreFeatures *f =
++            (const VkPhysicalDeviceTimelineSemaphoreFeatures *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: timelineSemaphoreKHR=%d\n", f->timelineSemaphore);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES: {
++         const VkPhysicalDeviceSynchronization2Features *f =
++            (const VkPhysicalDeviceSynchronization2Features *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: synchronization2KHR=%d\n", f->synchronization2);
++         break;
++      }
++      default:
++         fprintf(stderr, "DZN_CONTRACT[device]: pNext sType=%u\n", ext->sType);
++         break;
++      }
++
++      ext = ext->pNext;
++   }
++}
++
++static void
++dzn_contract_log_device_create_info(const VkDeviceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[device]: queueCreateInfoCount=%u enabledLayerCount=%u\n",
++           info->queueCreateInfoCount, info->enabledLayerCount);
++   dzn_contract_log_extensions("device", info->enabledExtensionCount, info->ppEnabledExtensionNames);
++   dzn_contract_log_device_feature_chain(info);
++}
++
+ static void
+ dzn_physical_device_release(struct dzn_physical_device *pdev)
+ {
+@@ -470,7 +620,8 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
+                        VK_QUEUE_TRANSFER_BIT,
+          .queueCount = 4,
+          .timestampValidBits = 64,
+-         .minImageTransferGranularity = { 0, 0, 0 },
++         /* D3D12 queues support subresource region copies; advertise unit granularity. */
++         .minImageTransferGranularity = { 1, 1, 1 },
+       },
+       .desc = {
+          .Type = D3D12_COMMAND_LIST_TYPE_DIRECT,
+@@ -483,7 +634,8 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
+                        VK_QUEUE_TRANSFER_BIT,
+          .queueCount = 8,
+          .timestampValidBits = 64,
+-         .minImageTransferGranularity = { 0, 0, 0 },
++         /* D3D12 queues support subresource region copies; advertise unit granularity. */
++         .minImageTransferGranularity = { 1, 1, 1 },
+       },
+       .desc = {
+          .Type = D3D12_COMMAND_LIST_TYPE_COMPUTE,
+@@ -663,6 +815,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
+                                  struct vk_features *features)
+ {
+    struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
++   const bool dual_src_blend = dzn_experimental_dual_src_blend_enabled();
+ 
+    bool support_descriptor_indexing = pdev->shader_model >= D3D_SHADER_MODEL_6_6 &&
+       !(instance->debug_flags & DZN_DEBUG_NO_BINDLESS);
+@@ -677,7 +830,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
+       .geometryShader = true,
+       .tessellationShader = false,
+       .sampleRateShading = true,
+-      .dualSrcBlend = false,
++      .dualSrcBlend = dual_src_blend,
+       .logicOp = false,
+       .multiDrawIndirect = true,
+       .drawIndirectFirstInstance = true,
+@@ -818,6 +971,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
+ {
+    /* minimum from the D3D and Vulkan specs */
+    const VkSampleCountFlags supported_sample_counts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
++   const bool dual_src_blend = dzn_experimental_dual_src_blend_enabled();
+ 
+    VkPhysicalDeviceType devtype = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    if (pdev->desc.is_warp)
+@@ -898,7 +1052,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
+       .maxGeometryTotalOutputComponents = D3D12_REQ_GS_INVOCATION_32BIT_OUTPUT_COMPONENT_LIMIT,
+       .maxFragmentInputComponents = D3D12_PS_INPUT_REGISTER_COUNT * D3D12_PS_INPUT_REGISTER_COMPONENTS,
+       .maxFragmentOutputAttachments = D3D12_PS_OUTPUT_REGISTER_COUNT,
+-      .maxFragmentDualSrcAttachments = 0,
++      .maxFragmentDualSrcAttachments = dual_src_blend ? 1 : 0,
+       .maxFragmentCombinedOutputResources = D3D12_PS_OUTPUT_REGISTER_COUNT,
+       .maxComputeSharedMemorySize = D3D12_CS_TGSM_REGISTER_COUNT * sizeof(float),
+       .maxComputeWorkGroupCount = { D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
+@@ -1786,6 +1940,8 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkInstance *out)
+ {
++   dzn_contract_log_instance_create_info(pCreateInfo);
++
+    struct dzn_instance *instance =
+       vk_zalloc2(vk_default_allocator(), pAllocator, sizeof(*instance), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+@@ -2260,6 +2416,8 @@ dzn_device_create(struct dzn_physical_device *pdev,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkDevice *out)
+ {
++   dzn_contract_log_device_create_info(pCreateInfo);
++
+    struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
+ 
+    uint32_t graphics_queue_count = 0;

@@ -1,0 +1,53 @@
+diff --git a/src/vulkan/runtime/vk_queue.c b/src/vulkan/runtime/vk_queue.c
+index eee0816..1aaf523 100644
+--- a/src/vulkan/runtime/vk_queue.c
++++ b/src/vulkan/runtime/vk_queue.c
+@@ -341,7 +341,7 @@ vk_queue_submit_add_fence_signal(struct vk_queue *queue,
+                                    vk_fence_get_active_sync(fence), 0);
+ }
+ 
+-static void
++static VkResult
+ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+                                    struct vk_queue_submit *submit,
+                                    const VkCommandBufferSubmitInfo *info)
+@@ -350,6 +350,10 @@ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+ 
+    assert(info->deviceMask == 0 || info->deviceMask == 1);
+    assert(cmd_buffer->pool->queue_family_index == queue->queue_family_index);
++   if (unlikely(info->deviceMask != 0 && info->deviceMask != 1))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
++   if (unlikely(cmd_buffer->pool->queue_family_index != queue->queue_family_index))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
+ 
+    /* Some drivers don't call vk_command_buffer_begin/end() yet and, for
+     * those, we'll see initial layout.  However, this is enough to catch
+@@ -358,9 +362,15 @@ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+    assert(cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL ||
+           cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE ||
+           cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_PENDING);
++   if (unlikely(cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_INITIAL &&
++                cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE &&
++                cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_PENDING))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
++
+    cmd_buffer->state = MESA_VK_COMMAND_BUFFER_STATE_PENDING;
+ 
+    submit->command_buffers[submit->command_buffer_count++] = cmd_buffer;
++   return VK_SUCCESS;
+ }
+ 
+ static void
+@@ -894,8 +904,10 @@ vk_queue_submit_create(struct vk_queue *queue,
+       vk_queue_submit_add_semaphore_wait(queue, submit, &info->waits[i]);
+ 
+    for (uint32_t i = 0; i < info->command_buffer_count; i++) {
+-      vk_queue_submit_add_command_buffer(queue, submit,
+-                                         &info->command_buffers[i]);
++      result = vk_queue_submit_add_command_buffer(queue, submit,
++                                                  &info->command_buffers[i]);
++      if (result != VK_SUCCESS)
++         goto fail;
+    }
+ 
+    for (uint32_t i = 0; i < info->buffer_bind_count; ++i)

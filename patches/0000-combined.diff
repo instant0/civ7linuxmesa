@@ -1,0 +1,668 @@
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index e5486c4..5557f04 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -30,6 +30,48 @@
+ 
+ #include "dxil_spirv_nir.h"
+ 
++static bool
++dzn_oodm_trace_enabled(void)
++{
++   static int cached = -1;
++   if (cached < 0) {
++      const char *env = getenv("DZN_OODM_TRACE");
++      cached = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
++   }
++   return cached == 1;
++}
++
++static unsigned
++dzn_desc_pool_list_length(struct list_head *head)
++{
++   unsigned count = 0;
++   list_for_each_entry(struct dzn_descriptor_heap_pool_entry, entry, head, link)
++      count++;
++   return count;
++}
++
++static void
++dzn_log_cmdbuf_error(struct dzn_cmd_buffer *cmdbuf, const char *where, VkResult err)
++{
++   if (!dzn_oodm_trace_enabled())
++      return;
++
++   fprintf(stderr,
++           "DZN_OODM[%s]: err=%d cmdbuf=%p "
++           "rtv_entries=%u dsv_entries=%u "
++           "rtv_off=%u dsv_off=%u cbv_off=%u samp_off=%u "
++           "rtv_active=%u dsv_active=%u cbv_active=%u samp_active=%u\n",
++           where, err, (void *)cmdbuf,
++           cmdbuf->rtvs.ht ? _mesa_hash_table_num_entries(cmdbuf->rtvs.ht) : 0,
++           cmdbuf->dsvs.ht ? _mesa_hash_table_num_entries(cmdbuf->dsvs.ht) : 0,
++           cmdbuf->rtvs.pool.offset, cmdbuf->dsvs.pool.offset,
++           cmdbuf->cbv_srv_uav_pool.offset, cmdbuf->sampler_pool.offset,
++           dzn_desc_pool_list_length(&cmdbuf->rtvs.pool.active_heaps),
++           dzn_desc_pool_list_length(&cmdbuf->dsvs.pool.active_heaps),
++           dzn_desc_pool_list_length(&cmdbuf->cbv_srv_uav_pool.active_heaps),
++           dzn_desc_pool_list_length(&cmdbuf->sampler_pool.active_heaps));
++}
++
+ static void
+ dzn_cmd_buffer_exec_transition_barriers(struct dzn_cmd_buffer *cmdbuf,
+                                         D3D12_RESOURCE_BARRIER *barriers,
+@@ -1072,11 +1114,16 @@ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
+       dzn_cmd_buffer_gather_events(cmdbuf);
+       dzn_cmd_buffer_gather_queries(cmdbuf);
+       HRESULT hres = ID3D12GraphicsCommandList1_Close(cmdbuf->cmdlist);
+-      if (FAILED(hres))
++      if (FAILED(hres)) {
+          vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "ID3D12GraphicsCommandList1_Close", VK_ERROR_OUT_OF_HOST_MEMORY);
++      }
+    }
+ 
+-   return vk_command_buffer_end(&cmdbuf->vk);
++   VkResult result = vk_command_buffer_end(&cmdbuf->vk);
++   if (result != VK_SUCCESS)
++      dzn_log_cmdbuf_error(cmdbuf, "vk_command_buffer_end", result);
++   return result;
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -1675,13 +1722,35 @@ dzn_cmd_buffer_get_dsv(struct dzn_cmd_buffer *cmdbuf,
+    if (!he) {
+       struct dzn_descriptor_heap *heap;
+       uint32_t slot;
++      VkResult result;
+ 
+-      // TODO: error handling
+       dsve = vk_alloc(&cmdbuf->vk.pool->alloc, sizeof(*dsve), 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++      if (!dsve) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       dsve->key = key;
+-      dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->dsvs.pool, device, 1, &heap, &slot);
++      result =
++         dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->dsvs.pool, device, 1, &heap, &slot);
++      if (result != VK_SUCCESS || !heap) {
++         vk_free(&cmdbuf->vk.pool->alloc, dsve);
++         vk_command_buffer_set_error(&cmdbuf->vk,
++                                     result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_dsv_alloc_slot",
++                              result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       dsve->handle = dzn_descriptor_heap_get_cpu_handle(heap, slot);
++      if (!dsve->handle.ptr) {
++         vk_free(&cmdbuf->vk.pool->alloc, dsve);
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_dsv_cpu_handle", VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       ID3D12Device1_CreateDepthStencilView(device->dev, image->res, desc, dsve->handle);
+       _mesa_hash_table_insert(cmdbuf->dsvs.ht, &dsve->key, dsve);
+    } else {
+@@ -1704,13 +1773,35 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
+    if (!he) {
+       struct dzn_descriptor_heap *heap;
+       uint32_t slot;
++      VkResult result;
+ 
+-      // TODO: error handling
+       rtve = vk_alloc(&cmdbuf->vk.pool->alloc, sizeof(*rtve), 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++      if (!rtve) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       rtve->key = key;
+-      dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
++      result =
++         dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
++      if (result != VK_SUCCESS || !heap) {
++         vk_free(&cmdbuf->vk.pool->alloc, rtve);
++         vk_command_buffer_set_error(&cmdbuf->vk,
++                                     result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_rtv_alloc_slot",
++                              result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       rtve->handle = dzn_descriptor_heap_get_cpu_handle(heap, slot);
++      if (!rtve->handle.ptr) {
++         vk_free(&cmdbuf->vk.pool->alloc, rtve);
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_rtv_cpu_handle", VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       ID3D12Device1_CreateRenderTargetView(device->dev, image->res, desc, rtve->handle);
+       he = _mesa_hash_table_insert(cmdbuf->rtvs.ht, &rtve->key, rtve);
+    } else {
+@@ -1728,8 +1819,22 @@ dzn_cmd_buffer_get_null_rtv(struct dzn_cmd_buffer *cmdbuf)
+    if (!cmdbuf->null_rtv.ptr) {
+       struct dzn_descriptor_heap *heap;
+       uint32_t slot;
+-      dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
++      VkResult result =
++         dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
++      if (result != VK_SUCCESS || !heap) {
++         vk_command_buffer_set_error(&cmdbuf->vk,
++                                     result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_null_rtv_alloc_slot",
++                              result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
++
+       cmdbuf->null_rtv = dzn_descriptor_heap_get_cpu_handle(heap, slot);
++      if (!cmdbuf->null_rtv.ptr) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         dzn_log_cmdbuf_error(cmdbuf, "get_null_rtv_cpu_handle", VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return (D3D12_CPU_DESCRIPTOR_HANDLE){ .ptr = 0 };
++      }
+ 
+       D3D12_RENDER_TARGET_VIEW_DESC desc = { 0 };
+       desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+@@ -3247,6 +3352,12 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+ static void
+ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+ {
++   /* Once command buffer recording has failed, avoid repeated heap allocation
++    * attempts that only spam the same OOM warning paths.
++    */
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return;
++
+    struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
+    struct dzn_descriptor_state *desc_state =
+       &cmdbuf->state.bindpoint[bindpoint].desc_state;
+@@ -3285,8 +3396,17 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+          struct dzn_descriptor_heap *dst_heap = NULL;
+          uint32_t dst_heap_offset = 0;
+ 
+-         dzn_descriptor_heap_pool_alloc_slots(pool, device, desc_count,
+-                                              &dst_heap, &dst_heap_offset);
++         VkResult result =
++            dzn_descriptor_heap_pool_alloc_slots(pool, device, desc_count,
++                                                 &dst_heap, &dst_heap_offset);
++         if (result != VK_SUCCESS || !dst_heap) {
++            vk_command_buffer_set_error(&cmdbuf->vk,
++                                        result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++            dzn_log_cmdbuf_error(cmdbuf, "update_heaps_alloc_slot",
++                                 result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY);
++            return;
++         }
++
+          new_heap_offsets[type] = dst_heap_offset;
+          update_root_desc_table[type] = true;
+ 
+@@ -4320,13 +4440,18 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+ {
+    struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
+ 
++   *view_heap = NULL;
++   *sampler_heap = NULL;
++   *view_heap_slot = 0;
++   *sampler_heap_slot = 0;
++
+    VkResult result =
+       dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->cbv_srv_uav_pool, device,
+                                            num_view_slots, view_heap, view_heap_slot);
+ 
+-   if (result != VK_SUCCESS) {
++   if (result != VK_SUCCESS || !*view_heap) {
+       vk_command_buffer_set_error(&cmdbuf->vk, result);
+-      return result;
++      return result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+ 
+    if (!device->support_static_samplers) {
+@@ -4334,9 +4459,9 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+          dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->sampler_pool, device,
+                                               1, sampler_heap, sampler_heap_slot);
+ 
+-      if (result != VK_SUCCESS) {
++      if (result != VK_SUCCESS || !*sampler_heap) {
+          vk_command_buffer_set_error(&cmdbuf->vk, result);
+-         return result;
++         return result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+       }
+ 
+       D3D12_SAMPLER_DESC sampler_desc = {
+@@ -4349,8 +4474,13 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+          .MinLOD = 0,
+          .MaxLOD = D3D12_FLOAT32_MAX,
+       };
+-      ID3D12Device4_CreateSampler(device->dev, &sampler_desc,
+-         dzn_descriptor_heap_get_cpu_handle(*sampler_heap, *sampler_heap_slot));
++      D3D12_CPU_DESCRIPTOR_HANDLE sampler_handle =
++         dzn_descriptor_heap_get_cpu_handle(*sampler_heap, *sampler_heap_slot);
++      if (!sampler_handle.ptr) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      }
++      ID3D12Device4_CreateSampler(device->dev, &sampler_desc, sampler_handle);
+    }
+ 
+    if (*view_heap != cmdbuf->state.heaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV] ||
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index fe27d61..28fd3a7 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -31,6 +31,59 @@
+ 
+ #include "util/mesa-blake3.h"
+ 
++static bool
++dzn_oodm_trace_enabled(void)
++{
++   static int cached = -1;
++   if (cached < 0) {
++      const char *env = getenv("DZN_OODM_TRACE");
++      cached = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
++   }
++   return cached == 1;
++}
++
++static unsigned
++dzn_desc_pool_list_length(struct list_head *head)
++{
++   unsigned count = 0;
++   list_for_each_entry(struct dzn_descriptor_heap_pool_entry, entry, head, link)
++      count++;
++   return count;
++}
++
++static const char *
++dzn_desc_heap_type_name(D3D12_DESCRIPTOR_HEAP_TYPE type)
++{
++   switch (type) {
++   case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: return "CBV_SRV_UAV";
++   case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
++   case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
++   case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
++   default: return "UNKNOWN";
++   }
++}
++
++static uint32_t
++dzn_cbv_srv_uav_heap_min_desc(void)
++{
++   /* Bigger shader-visible CBV/SRV/UAV heaps reduce heap churn and repeated
++    * CreateDescriptorHeap calls under heavy descriptor pressure.
++    */
++   static int cached = -1;
++   if (cached < 0) {
++      uint32_t value = 16384;
++      const char *env = getenv("DZN_CBV_SRV_UAV_HEAP_MIN_DESC");
++      if (env && env[0]) {
++         char *end = NULL;
++         unsigned long parsed = strtoul(env, &end, 10);
++         if (end != env && parsed > 0 && parsed <= MAX_DESCS_PER_CBV_SRV_UAV_HEAP)
++            value = (uint32_t)parsed;
++      }
++      cached = (int)value;
++   }
++   return (uint32_t)cached;
++}
++
+ static uint32_t
+ translate_desc_stages(VkShaderStageFlags in)
+ {
+@@ -959,6 +1012,12 @@ dzn_descriptor_heap_init(struct dzn_descriptor_heap *heap,
+ D3D12_CPU_DESCRIPTOR_HANDLE
+ dzn_descriptor_heap_get_cpu_handle(const struct dzn_descriptor_heap *heap, uint32_t desc_offset)
+ {
++   if (!heap || !heap->cpu_base || desc_offset >= heap->desc_count) {
++      return (D3D12_CPU_DESCRIPTOR_HANDLE) {
++         .ptr = 0,
++      };
++   }
++
+    return (D3D12_CPU_DESCRIPTOR_HANDLE) {
+       .ptr = heap->cpu_base + (desc_offset * heap->desc_sz),
+    };
+@@ -1932,6 +1991,12 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
+       uint32_t alloc_step = ALIGN_POT(desc_count * pool->desc_sz, granularity);
+       uint32_t heap_desc_count = MAX2(alloc_step / pool->desc_sz, 16);
+ 
++      if (pool->shader_visible &&
++          pool->type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
++         heap_desc_count = MAX2(heap_desc_count, dzn_cbv_srv_uav_heap_min_desc());
++         heap_desc_count = MIN2(heap_desc_count, MAX_DESCS_PER_CBV_SRV_UAV_HEAP);
++      }
++
+       /* Maximum of 2048 samplers per heap when shader_visible is true. */
+       if (pool->shader_visible &&
+           pool->type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+@@ -1953,13 +2018,36 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
+          new_heap =
+             vk_zalloc(pool->alloc, sizeof(*new_heap), 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+-         if (!new_heap)
++         if (!new_heap) {
++            if (dzn_oodm_trace_enabled()) {
++               fprintf(stderr,
++                       "DZN_OODM[pool_alloc]: type=%s shader_visible=%u req_desc=%u "
++                       "offset=%u last_heap_desc=%u active=%u free=%u target_heap_desc=%u "
++                       "err=VK_ERROR_OUT_OF_HOST_MEMORY\n",
++                       dzn_desc_heap_type_name(pool->type), pool->shader_visible,
++                       desc_count, pool->offset, last_heap_desc_count,
++                       dzn_desc_pool_list_length(&pool->active_heaps),
++                       dzn_desc_pool_list_length(&pool->free_heaps),
++                       heap_desc_count);
++            }
+             return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++         }
+ 
+          VkResult result =
+             dzn_descriptor_heap_init(&new_heap->heap, device, pool->type,
+                                      heap_desc_count, pool->shader_visible);
+          if (result != VK_SUCCESS) {
++            if (dzn_oodm_trace_enabled()) {
++               fprintf(stderr,
++                       "DZN_OODM[pool_alloc]: type=%s shader_visible=%u req_desc=%u "
++                       "offset=%u last_heap_desc=%u active=%u free=%u target_heap_desc=%u "
++                       "err=%d\n",
++                       dzn_desc_heap_type_name(pool->type), pool->shader_visible,
++                       desc_count, pool->offset, last_heap_desc_count,
++                       dzn_desc_pool_list_length(&pool->active_heaps),
++                       dzn_desc_pool_list_length(&pool->free_heaps),
++                       heap_desc_count, result);
++            }
+             vk_free(&device->vk.alloc, new_heap);
+             return result;
+          }
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index 7248e06..07ce2b5 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -192,6 +192,156 @@ static const struct debug_control dzn_debug_options[] = {
+    { NULL, 0 }
+ };
+ 
++static bool
++dzn_contract_log_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *opt = os_get_option("DZN_CONTRACT_LOG");
++      enabled = (opt && opt[0] && strcmp(opt, "0") != 0) ? 1 : 0;
++   }
++   return enabled == 1;
++}
++
++static bool
++dzn_experimental_dual_src_blend_enabled(void)
++{
++   return debug_get_bool_option("DZN_EXPERIMENTAL_DUAL_SRC_BLEND", false);
++}
++
++static void
++dzn_contract_log_extensions(const char *scope, uint32_t count, const char *const *names)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[%s]: extension_count=%u\n", scope, count);
++   for (uint32_t i = 0; i < count; i++)
++      fprintf(stderr, "DZN_CONTRACT[%s]: ext[%u]=%s\n", scope, i, names[i]);
++}
++
++static void
++dzn_contract_log_instance_create_info(const VkInstanceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[instance]: apiVersion=0x%x app=%s engine=%s\n",
++           info->pApplicationInfo ? info->pApplicationInfo->apiVersion : 0,
++           (info->pApplicationInfo && info->pApplicationInfo->pApplicationName) ?
++           info->pApplicationInfo->pApplicationName : "(null)",
++           (info->pApplicationInfo && info->pApplicationInfo->pEngineName) ?
++           info->pApplicationInfo->pEngineName : "(null)");
++   dzn_contract_log_extensions("instance", info->enabledExtensionCount, info->ppEnabledExtensionNames);
++}
++
++static void
++dzn_contract_log_features2(const VkPhysicalDeviceFeatures2 *f2)
++{
++   fprintf(stderr,
++           "DZN_CONTRACT[device]: features2 core: dualSrcBlend=%d samplerAnisotropy=%d imageCubeArray=%d shaderInt64=%d\n",
++           f2->features.dualSrcBlend,
++           f2->features.samplerAnisotropy,
++           f2->features.imageCubeArray,
++           f2->features.shaderInt64);
++}
++
++static void
++dzn_contract_log_device_feature_chain(const VkDeviceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   if (info->pEnabledFeatures) {
++      const VkPhysicalDeviceFeatures *f = info->pEnabledFeatures;
++      fprintf(stderr,
++              "DZN_CONTRACT[device]: enabledFeatures legacy: dualSrcBlend=%d samplerAnisotropy=%d imageCubeArray=%d shaderInt64=%d\n",
++              f->dualSrcBlend, f->samplerAnisotropy, f->imageCubeArray, f->shaderInt64);
++   }
++
++   const VkBaseInStructure *ext = (const VkBaseInStructure *)info->pNext;
++   while (ext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2: {
++         dzn_contract_log_features2((const VkPhysicalDeviceFeatures2 *)ext);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
++         const VkPhysicalDeviceVulkan11Features *f = (const VkPhysicalDeviceVulkan11Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan11: multiview=%d variablePointers=%d\n",
++                 f->multiview, f->variablePointers);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
++         const VkPhysicalDeviceVulkan12Features *f = (const VkPhysicalDeviceVulkan12Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan12: descriptorIndexing=%d bufferDeviceAddress=%d timelineSemaphore=%d shaderFloat16=%d\n",
++                 f->descriptorIndexing, f->bufferDeviceAddress, f->timelineSemaphore, f->shaderFloat16);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: {
++         const VkPhysicalDeviceVulkan13Features *f = (const VkPhysicalDeviceVulkan13Features *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: vulkan13: dynamicRendering=%d synchronization2=%d\n",
++                 f->dynamicRendering, f->synchronization2);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES: {
++         const VkPhysicalDeviceDescriptorIndexingFeatures *f =
++            (const VkPhysicalDeviceDescriptorIndexingFeatures *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: descriptorIndexingEXT: runtimeDescriptorArray=%d descriptorBindingPartiallyBound=%d\n",
++                 f->runtimeDescriptorArray, f->descriptorBindingPartiallyBound);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES: {
++         const VkPhysicalDeviceBufferDeviceAddressFeatures *f =
++            (const VkPhysicalDeviceBufferDeviceAddressFeatures *)ext;
++         fprintf(stderr,
++                 "DZN_CONTRACT[device]: bufferDeviceAddressEXT: bufferDeviceAddress=%d captureReplay=%d\n",
++                 f->bufferDeviceAddress, f->bufferDeviceAddressCaptureReplay);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES: {
++         const VkPhysicalDeviceDynamicRenderingFeatures *f =
++            (const VkPhysicalDeviceDynamicRenderingFeatures *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: dynamicRenderingKHR=%d\n", f->dynamicRendering);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES: {
++         const VkPhysicalDeviceTimelineSemaphoreFeatures *f =
++            (const VkPhysicalDeviceTimelineSemaphoreFeatures *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: timelineSemaphoreKHR=%d\n", f->timelineSemaphore);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES: {
++         const VkPhysicalDeviceSynchronization2Features *f =
++            (const VkPhysicalDeviceSynchronization2Features *)ext;
++         fprintf(stderr, "DZN_CONTRACT[device]: synchronization2KHR=%d\n", f->synchronization2);
++         break;
++      }
++      default:
++         fprintf(stderr, "DZN_CONTRACT[device]: pNext sType=%u\n", ext->sType);
++         break;
++      }
++
++      ext = ext->pNext;
++   }
++}
++
++static void
++dzn_contract_log_device_create_info(const VkDeviceCreateInfo *info)
++{
++   if (!dzn_contract_log_enabled())
++      return;
++
++   fprintf(stderr, "DZN_CONTRACT[device]: queueCreateInfoCount=%u enabledLayerCount=%u\n",
++           info->queueCreateInfoCount, info->enabledLayerCount);
++   dzn_contract_log_extensions("device", info->enabledExtensionCount, info->ppEnabledExtensionNames);
++   dzn_contract_log_device_feature_chain(info);
++}
++
+ static void
+ dzn_physical_device_release(struct dzn_physical_device *pdev)
+ {
+@@ -470,7 +620,8 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
+                        VK_QUEUE_TRANSFER_BIT,
+          .queueCount = 4,
+          .timestampValidBits = 64,
+-         .minImageTransferGranularity = { 0, 0, 0 },
++         /* D3D12 queues support subresource region copies; advertise unit granularity. */
++         .minImageTransferGranularity = { 1, 1, 1 },
+       },
+       .desc = {
+          .Type = D3D12_COMMAND_LIST_TYPE_DIRECT,
+@@ -483,7 +634,8 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
+                        VK_QUEUE_TRANSFER_BIT,
+          .queueCount = 8,
+          .timestampValidBits = 64,
+-         .minImageTransferGranularity = { 0, 0, 0 },
++         /* D3D12 queues support subresource region copies; advertise unit granularity. */
++         .minImageTransferGranularity = { 1, 1, 1 },
+       },
+       .desc = {
+          .Type = D3D12_COMMAND_LIST_TYPE_COMPUTE,
+@@ -663,6 +815,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
+                                  struct vk_features *features)
+ {
+    struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
++   const bool dual_src_blend = dzn_experimental_dual_src_blend_enabled();
+ 
+    bool support_descriptor_indexing = pdev->shader_model >= D3D_SHADER_MODEL_6_6 &&
+       !(instance->debug_flags & DZN_DEBUG_NO_BINDLESS);
+@@ -677,7 +830,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
+       .geometryShader = true,
+       .tessellationShader = false,
+       .sampleRateShading = true,
+-      .dualSrcBlend = false,
++      .dualSrcBlend = dual_src_blend,
+       .logicOp = false,
+       .multiDrawIndirect = true,
+       .drawIndirectFirstInstance = true,
+@@ -818,6 +971,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
+ {
+    /* minimum from the D3D and Vulkan specs */
+    const VkSampleCountFlags supported_sample_counts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
++   const bool dual_src_blend = dzn_experimental_dual_src_blend_enabled();
+ 
+    VkPhysicalDeviceType devtype = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    if (pdev->desc.is_warp)
+@@ -898,7 +1052,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
+       .maxGeometryTotalOutputComponents = D3D12_REQ_GS_INVOCATION_32BIT_OUTPUT_COMPONENT_LIMIT,
+       .maxFragmentInputComponents = D3D12_PS_INPUT_REGISTER_COUNT * D3D12_PS_INPUT_REGISTER_COMPONENTS,
+       .maxFragmentOutputAttachments = D3D12_PS_OUTPUT_REGISTER_COUNT,
+-      .maxFragmentDualSrcAttachments = 0,
++      .maxFragmentDualSrcAttachments = dual_src_blend ? 1 : 0,
+       .maxFragmentCombinedOutputResources = D3D12_PS_OUTPUT_REGISTER_COUNT,
+       .maxComputeSharedMemorySize = D3D12_CS_TGSM_REGISTER_COUNT * sizeof(float),
+       .maxComputeWorkGroupCount = { D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
+@@ -1786,6 +1940,8 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkInstance *out)
+ {
++   dzn_contract_log_instance_create_info(pCreateInfo);
++
+    struct dzn_instance *instance =
+       vk_zalloc2(vk_default_allocator(), pAllocator, sizeof(*instance), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+@@ -2260,6 +2416,8 @@ dzn_device_create(struct dzn_physical_device *pdev,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkDevice *out)
+ {
++   dzn_contract_log_device_create_info(pCreateInfo);
++
+    struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
+ 
+    uint32_t graphics_queue_count = 0;
+diff --git a/src/vulkan/runtime/vk_queue.c b/src/vulkan/runtime/vk_queue.c
+index eee0816..1aaf523 100644
+--- a/src/vulkan/runtime/vk_queue.c
++++ b/src/vulkan/runtime/vk_queue.c
+@@ -341,7 +341,7 @@ vk_queue_submit_add_fence_signal(struct vk_queue *queue,
+                                    vk_fence_get_active_sync(fence), 0);
+ }
+ 
+-static void
++static VkResult
+ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+                                    struct vk_queue_submit *submit,
+                                    const VkCommandBufferSubmitInfo *info)
+@@ -350,6 +350,10 @@ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+ 
+    assert(info->deviceMask == 0 || info->deviceMask == 1);
+    assert(cmd_buffer->pool->queue_family_index == queue->queue_family_index);
++   if (unlikely(info->deviceMask != 0 && info->deviceMask != 1))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
++   if (unlikely(cmd_buffer->pool->queue_family_index != queue->queue_family_index))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
+ 
+    /* Some drivers don't call vk_command_buffer_begin/end() yet and, for
+     * those, we'll see initial layout.  However, this is enough to catch
+@@ -358,9 +362,15 @@ vk_queue_submit_add_command_buffer(struct vk_queue *queue,
+    assert(cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_INITIAL ||
+           cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE ||
+           cmd_buffer->state == MESA_VK_COMMAND_BUFFER_STATE_PENDING);
++   if (unlikely(cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_INITIAL &&
++                cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_EXECUTABLE &&
++                cmd_buffer->state != MESA_VK_COMMAND_BUFFER_STATE_PENDING))
++      return vk_error(queue, VK_ERROR_UNKNOWN);
++
+    cmd_buffer->state = MESA_VK_COMMAND_BUFFER_STATE_PENDING;
+ 
+    submit->command_buffers[submit->command_buffer_count++] = cmd_buffer;
++   return VK_SUCCESS;
+ }
+ 
+ static void
+@@ -894,8 +904,10 @@ vk_queue_submit_create(struct vk_queue *queue,
+       vk_queue_submit_add_semaphore_wait(queue, submit, &info->waits[i]);
+ 
+    for (uint32_t i = 0; i < info->command_buffer_count; i++) {
+-      vk_queue_submit_add_command_buffer(queue, submit,
+-                                         &info->command_buffers[i]);
++      result = vk_queue_submit_add_command_buffer(queue, submit,
++                                                  &info->command_buffers[i]);
++      if (result != VK_SUCCESS)
++         goto fail;
+    }
+ 
+    for (uint32_t i = 0; i < info->buffer_bind_count; ++i)
