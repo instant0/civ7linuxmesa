@@ -1,5 +1,5 @@
 diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
-index fe27d61..28fd3a7 100644
+index fe27d61..7d47ae6 100644
 --- a/src/microsoft/vulkan/dzn_descriptor_set.c
 +++ b/src/microsoft/vulkan/dzn_descriptor_set.c
 @@ -31,6 +31,59 @@
@@ -41,12 +41,12 @@ index fe27d61..28fd3a7 100644
 +static uint32_t
 +dzn_cbv_srv_uav_heap_min_desc(void)
 +{
-+   /* Bigger shader-visible CBV/SRV/UAV heaps reduce heap churn and repeated
-+    * CreateDescriptorHeap calls under heavy descriptor pressure.
++   /* Baseline for dynamic shader-visible CBV/SRV/UAV heap growth.
++    * Heavy workloads can still grow aggressively through doubling.
 +    */
 +   static int cached = -1;
 +   if (cached < 0) {
-+      uint32_t value = 16384;
++      uint32_t value = 2048;
 +      const char *env = getenv("DZN_CBV_SRV_UAV_HEAP_MIN_DESC");
 +      if (env && env[0]) {
 +         char *end = NULL;
@@ -75,20 +75,34 @@ index fe27d61..28fd3a7 100644
     return (D3D12_CPU_DESCRIPTOR_HANDLE) {
        .ptr = heap->cpu_base + (desc_offset * heap->desc_sz),
     };
-@@ -1932,6 +1991,12 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
+@@ -1932,6 +1991,26 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
        uint32_t alloc_step = ALIGN_POT(desc_count * pool->desc_sz, granularity);
        uint32_t heap_desc_count = MAX2(alloc_step / pool->desc_sz, 16);
  
 +      if (pool->shader_visible &&
 +          pool->type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
-+         heap_desc_count = MAX2(heap_desc_count, dzn_cbv_srv_uav_heap_min_desc());
++         /* Grow dynamically to avoid overcommitting memory for light apps while
++          * still scaling fast under descriptor pressure.
++          */
++         const uint32_t base_min = dzn_cbv_srv_uav_heap_min_desc();
++         uint32_t doubled = base_min;
++
++         if (last_heap_desc_count > 0) {
++            if (last_heap_desc_count > (MAX_DESCS_PER_CBV_SRV_UAV_HEAP / 2))
++               doubled = MAX_DESCS_PER_CBV_SRV_UAV_HEAP;
++            else
++               doubled = last_heap_desc_count * 2;
++         }
++
++         heap_desc_count = MAX2(heap_desc_count, base_min);
++         heap_desc_count = MAX2(heap_desc_count, doubled);
 +         heap_desc_count = MIN2(heap_desc_count, MAX_DESCS_PER_CBV_SRV_UAV_HEAP);
 +      }
 +
        /* Maximum of 2048 samplers per heap when shader_visible is true. */
        if (pool->shader_visible &&
            pool->type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
-@@ -1953,13 +2018,36 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
+@@ -1953,13 +2032,36 @@ dzn_descriptor_heap_pool_alloc_slots(struct dzn_descriptor_heap_pool *pool,
           new_heap =
              vk_zalloc(pool->alloc, sizeof(*new_heap), 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);

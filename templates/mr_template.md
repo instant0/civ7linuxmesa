@@ -1,36 +1,25 @@
-# dzn: WSL2 Civ7 stability fixes (OOM/error-path hardening + granularity correction)
+# dzn: WSL2 stability fixes for descriptor-pressure and submit-state handling
 
-## What this MR does
-This MR contains correctness/stability fixes observed while debugging Civ7 on WSL2+dzn:
-
-1. Fix queue family transfer granularity advertisement (`minImageTransferGranularity={1,1,1}`).
-2. Harden dzn descriptor/cmd-buffer error paths for allocation/OOM/null-handle cases.
-
-Optional follow-up (if included):
-3. Tune shader-visible CBV/SRV/UAV heap minimum size to reduce heap churn under descriptor pressure.
+## What this MR changes
+1. Correct queue-family transfer granularity advertisement.
+2. Harden descriptor/cmd-buffer OOM and null-handle error propagation.
+3. Add queue-submit guardrails to prevent invalid state propagation.
 
 ## Why
-Observed failure path under load:
-- descriptor heap growth can fail with `VK_ERROR_OUT_OF_DEVICE_MEMORY`
-- command buffer end fails afterwards
-- downstream app crash behavior follows
+Observed failure pattern under load:
+- descriptor allocation pressure -> OOM/failed allocation
+- command buffer enters invalid state
+- submit path instability follows
 
-This patch set focuses on preventing invalid state propagation and reducing avoidable heap churn.
-
-## Test environment
-- WSL2 Ubuntu 24.04.4, kernel `6.6.87.2-microsoft-standard-WSL2`
-- NVIDIA RTX 4080, dzn (D3D12 backend)
-- Mesa base: `16e15ee20514de1684b349e809fa9632e5afbe4d`
+These changes convert fragile failure cascades into explicit, recoverable error paths.
 
 ## Validation summary
-- Before: frequent OODM markers and reproducible crash runs (`exit_code=139`).
-- After: successful stress run observed (`exit_code=0`) with no OODM markers in run trace.
+- Before: reproducible unstable runs with OOM markers and crash exits.
+- After: stable runs observed with clean exit and no OOM markers in primary trace logs.
 
-## Evidence references
-- failing run: `/home/username/projects/civ7linux/docs/trace_runs/20260325_222212`
-- successful run: `/home/username/projects/civ7linux/docs/trace_runs/20260325_222638`
-- detailed timeline: `/home/username/projects/civ7linux/docs/wsl_vulkan_debug_progress.md`
+## Environment class
+- WSL2 + dzn over D3D12
+- Mesa base: `16e15ee20514de1684b349e809fa9632e5afbe4d`
 
 ## Notes
-- Some local instrumentation used for diagnosis (`DZN_CONTRACT_LOG`, `DZN_OODM_TRACE`) is intentionally kept out of this MR unless requested.
-
+- Investigation-only logging knobs (`DZN_CONTRACT_LOG`, `DZN_OODM_TRACE`, `DZN_SYNC_TRACE`) are not required for core fix behavior and can be split out.

@@ -1,8 +1,8 @@
 diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
-index e5486c4..5557f04 100644
+index e5486c4..c4369d6 100644
 --- a/src/microsoft/vulkan/dzn_cmd_buffer.c
 +++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
-@@ -30,6 +30,48 @@
+@@ -30,6 +30,74 @@
  
  #include "dxil_spirv_nir.h"
  
@@ -48,17 +48,45 @@ index e5486c4..5557f04 100644
 +           dzn_desc_pool_list_length(&cmdbuf->sampler_pool.active_heaps));
 +}
 +
++static void
++dzn_log_cmdbuf_hresult(struct dzn_cmd_buffer *cmdbuf, const char *where, HRESULT hres, VkResult err)
++{
++   if (!dzn_oodm_trace_enabled())
++      return;
++
++   fprintf(stderr, "DZN_OODM[%s]: hres=0x%08x mapped_err=%d\n",
++           where, (unsigned)hres, err);
++   dzn_log_cmdbuf_error(cmdbuf, where, err);
++}
++
++static VkResult
++dzn_vkresult_from_d3d12_hresult(HRESULT hres)
++{
++   switch (hres) {
++   case E_OUTOFMEMORY:
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   case DXGI_ERROR_DEVICE_REMOVED:
++   case DXGI_ERROR_DEVICE_HUNG:
++   case DXGI_ERROR_DEVICE_RESET:
++      return VK_ERROR_DEVICE_LOST;
++   default:
++      return VK_ERROR_UNKNOWN;
++   }
++}
++
  static void
  dzn_cmd_buffer_exec_transition_barriers(struct dzn_cmd_buffer *cmdbuf,
                                          D3D12_RESOURCE_BARRIER *barriers,
-@@ -1072,11 +1114,16 @@ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
+@@ -1072,11 +1140,17 @@ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
        dzn_cmd_buffer_gather_events(cmdbuf);
        dzn_cmd_buffer_gather_queries(cmdbuf);
        HRESULT hres = ID3D12GraphicsCommandList1_Close(cmdbuf->cmdlist);
 -      if (FAILED(hres))
+-         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
 +      if (FAILED(hres)) {
-          vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-+         dzn_log_cmdbuf_error(cmdbuf, "ID3D12GraphicsCommandList1_Close", VK_ERROR_OUT_OF_HOST_MEMORY);
++         VkResult err = dzn_vkresult_from_d3d12_hresult(hres);
++         vk_command_buffer_set_error(&cmdbuf->vk, err);
++         dzn_log_cmdbuf_hresult(cmdbuf, "ID3D12GraphicsCommandList1_Close", hres, err);
 +      }
     }
  
@@ -70,7 +98,7 @@ index e5486c4..5557f04 100644
  }
  
  VKAPI_ATTR void VKAPI_CALL
-@@ -1675,13 +1722,35 @@ dzn_cmd_buffer_get_dsv(struct dzn_cmd_buffer *cmdbuf,
+@@ -1675,13 +1749,35 @@ dzn_cmd_buffer_get_dsv(struct dzn_cmd_buffer *cmdbuf,
     if (!he) {
        struct dzn_descriptor_heap *heap;
        uint32_t slot;
@@ -108,7 +136,7 @@ index e5486c4..5557f04 100644
        ID3D12Device1_CreateDepthStencilView(device->dev, image->res, desc, dsve->handle);
        _mesa_hash_table_insert(cmdbuf->dsvs.ht, &dsve->key, dsve);
     } else {
-@@ -1704,13 +1773,35 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
+@@ -1704,13 +1800,35 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
     if (!he) {
        struct dzn_descriptor_heap *heap;
        uint32_t slot;
@@ -146,7 +174,7 @@ index e5486c4..5557f04 100644
        ID3D12Device1_CreateRenderTargetView(device->dev, image->res, desc, rtve->handle);
        he = _mesa_hash_table_insert(cmdbuf->rtvs.ht, &rtve->key, rtve);
     } else {
-@@ -1728,8 +1819,22 @@ dzn_cmd_buffer_get_null_rtv(struct dzn_cmd_buffer *cmdbuf)
+@@ -1728,8 +1846,22 @@ dzn_cmd_buffer_get_null_rtv(struct dzn_cmd_buffer *cmdbuf)
     if (!cmdbuf->null_rtv.ptr) {
        struct dzn_descriptor_heap *heap;
        uint32_t slot;
@@ -170,7 +198,7 @@ index e5486c4..5557f04 100644
  
        D3D12_RENDER_TARGET_VIEW_DESC desc = { 0 };
        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-@@ -3247,6 +3352,12 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+@@ -3247,6 +3379,12 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
  static void
  dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
  {
@@ -183,7 +211,7 @@ index e5486c4..5557f04 100644
     struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
     struct dzn_descriptor_state *desc_state =
        &cmdbuf->state.bindpoint[bindpoint].desc_state;
-@@ -3285,8 +3396,17 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+@@ -3285,8 +3423,17 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
           struct dzn_descriptor_heap *dst_heap = NULL;
           uint32_t dst_heap_offset = 0;
  
@@ -203,7 +231,7 @@ index e5486c4..5557f04 100644
           new_heap_offsets[type] = dst_heap_offset;
           update_root_desc_table[type] = true;
  
-@@ -4320,13 +4440,18 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+@@ -4320,13 +4467,20 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
  {
     struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
  
@@ -217,26 +245,32 @@ index e5486c4..5557f04 100644
                                             num_view_slots, view_heap, view_heap_slot);
  
 -   if (result != VK_SUCCESS) {
-+   if (result != VK_SUCCESS || !*view_heap) {
-       vk_command_buffer_set_error(&cmdbuf->vk, result);
+-      vk_command_buffer_set_error(&cmdbuf->vk, result);
 -      return result;
-+      return result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   if (result != VK_SUCCESS || !*view_heap) {
++      VkResult alloc_err =
++         result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      vk_command_buffer_set_error(&cmdbuf->vk, alloc_err);
++      return alloc_err;
     }
  
     if (!device->support_static_samplers) {
-@@ -4334,9 +4459,9 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+@@ -4334,9 +4488,11 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
           dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->sampler_pool, device,
                                                1, sampler_heap, sampler_heap_slot);
  
 -      if (result != VK_SUCCESS) {
-+      if (result != VK_SUCCESS || !*sampler_heap) {
-          vk_command_buffer_set_error(&cmdbuf->vk, result);
+-         vk_command_buffer_set_error(&cmdbuf->vk, result);
 -         return result;
-+         return result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      if (result != VK_SUCCESS || !*sampler_heap) {
++         VkResult alloc_err =
++            result != VK_SUCCESS ? result : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         vk_command_buffer_set_error(&cmdbuf->vk, alloc_err);
++         return alloc_err;
        }
  
        D3D12_SAMPLER_DESC sampler_desc = {
-@@ -4349,8 +4474,13 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+@@ -4349,8 +4505,13 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
           .MinLOD = 0,
           .MaxLOD = D3D12_FLOAT32_MAX,
        };
